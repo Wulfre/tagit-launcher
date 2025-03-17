@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,6 +48,72 @@ type Button struct {
 	fn   func()
 }
 
+type SemVer struct {
+	Major int
+	Minor int
+	Patch int
+}
+
+// ParseSemVer parses a version string into a SemVer struct, assumes version is always in the format x.y.z
+func ParseSemVer(version string) (SemVer, error) {
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return SemVer{}, fmt.Errorf("invalid semantic version: %s", version)
+	}
+
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return SemVer{}, fmt.Errorf("invalid major version: %s", parts[0])
+	}
+
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return SemVer{}, fmt.Errorf("invalid minor version: %s", parts[1])
+	}
+
+	patch, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return SemVer{}, fmt.Errorf("invalid patch version: %s", parts[2])
+	}
+
+	return SemVer{Major: major, Minor: minor, Patch: patch}, nil
+}
+
+// CompareVersions compares two versions and returns:
+// 0 - versions are equal
+// 1 - oldVersion has only patch difference (lower patch)
+// 2 - oldVersion has minor or major difference (lower minor/major)
+// -1 - error parsing versions
+func CompareVersions(oldVersion, newVersion string) int {
+	// normalize special suffixes
+	oldVer := strings.TrimSuffix(strings.TrimSuffix(oldVersion, "x"), "i")
+
+	old, err := ParseSemVer(oldVer)
+	if err != nil {
+		return -1
+	}
+
+	new, err := ParseSemVer(newVersion)
+	if err != nil {
+		return -1
+	}
+
+	if old.Major != new.Major {
+		return 3
+	}
+
+	if old.Minor != new.Minor {
+		return 2
+	}
+
+	if old.Patch != new.Patch {
+		return 1
+	}
+
+	// versions are the same
+	return 0
+}
+
 var (
 	downloadTotal   atomic.Int64
 	downloadCurrent atomic.Int64
@@ -66,40 +133,64 @@ func launchTagIt() {
 }
 
 // downloads the application assets for the current platform, downloads are performed concurrently and progress is tracked atomically
-func downloadFiles(tag string, assets []Asset) {
+func downloadFiles(tag string, assets []Asset, updateType int) {
 	downloadTotal.Store(0)
 	downloadCurrent.Store(0)
 	os.MkdirAll(cacheDir, 0755)
 
 	var wg sync.WaitGroup
+	downloadMap := make(map[string]bool)
+	var downloadMapMutex sync.Mutex
+
+	// calculate total download size and create file mapping
 	for _, a := range assets {
-		if strings.HasSuffix(a.Name, ".pck") || strings.Contains(strings.ToLower(a.Name), runtime.GOOS) {
+		isPckFile := strings.HasSuffix(a.Name, ".pck")
+		isExecutable := strings.Contains(strings.ToLower(a.Name), runtime.GOOS)
+
+		if (updateType == 1 && isPckFile) ||
+			(updateType != 1 && (isPckFile || isExecutable)) {
 			downloadTotal.Add(a.Size)
 			wg.Add(1)
+
 			go func(name, url string) {
 				defer wg.Done()
+
+				tempFilePath := filepath.Join(cacheDir, "_"+name)
+
 				resp, err := http.Get(url)
 				if err != nil || resp.StatusCode != http.StatusOK {
 					return
 				}
 				defer resp.Body.Close()
 
-				out, err := os.OpenFile(filepath.Join(cacheDir, name), os.O_CREATE|os.O_WRONLY, 0755)
+				out, err := os.OpenFile(tempFilePath, os.O_CREATE|os.O_WRONLY, 0755)
 				if err != nil {
 					return
 				}
 				defer out.Close()
 
 				buf := make([]byte, 1024*1024)
+				success := true
 				for {
 					n, err := resp.Body.Read(buf)
 					if n > 0 {
-						out.Write(buf[:n])
+						_, writeErr := out.Write(buf[:n])
+						if writeErr != nil {
+							success = false
+							break
+						}
 						downloadCurrent.Add(int64(n))
 					}
 					if err != nil {
 						break
 					}
+				}
+
+				// mark this file as successfully downloaded
+				if success {
+					downloadMapMutex.Lock()
+					downloadMap[name] = true
+					downloadMapMutex.Unlock()
 				}
 			}(a.Name, a.URL)
 		}
@@ -108,9 +199,26 @@ func downloadFiles(tag string, assets []Asset) {
 	// wait for all downloads to complete and launch the application
 	go func() {
 		wg.Wait()
+
 		if downloadCurrent.Load() == downloadTotal.Load() {
-			os.WriteFile(filepath.Join(cacheDir, "version"), []byte(tag), 0644)
-			launchTagIt()
+			allSuccessful := true
+
+			for name := range downloadMap {
+				tempPath := filepath.Join(cacheDir, "_"+name)
+				finalPath := filepath.Join(cacheDir, name)
+
+				os.Remove(finalPath)
+
+				if err := os.Rename(tempPath, finalPath); err != nil {
+					allSuccessful = false
+					break
+				}
+			}
+
+			if allSuccessful {
+				os.WriteFile(filepath.Join(cacheDir, "version"), []byte(tag), 0644)
+				launchTagIt()
+			}
 		}
 	}()
 }
@@ -128,6 +236,9 @@ func main() {
 	curVer := strings.TrimSpace(string(func() []byte { b, _ := os.ReadFile(filepath.Join(cacheDir, "version")); return b }()))
 	subtitle := "Unable to check for updates."
 
+	// default to full download for first install
+	updateType := -1
+
 	// compare local version with latest release
 	if release.Tag != "" {
 		switch {
@@ -137,7 +248,18 @@ func main() {
 			(strings.HasSuffix(curVer, "i") && strings.TrimSuffix(curVer, "i") == release.Tag): // update ignored
 			go launchTagIt()
 		default: // update available
-			subtitle = "Update " + release.Tag + " available"
+			updateType = CompareVersions(curVer, release.Tag)
+			switch updateType {
+			case 0:
+				// versions are the same, no update needed
+				go launchTagIt()
+			case 1:
+				subtitle = "Patch update " + release.Tag + " available"
+			case 2, 3:
+				subtitle = "Full update " + release.Tag + " available"
+			default:
+				subtitle = "Update " + release.Tag + " available"
+			}
 		}
 	}
 
@@ -167,7 +289,7 @@ func main() {
 	buttons := []Button{
 		{buttonText, func() {
 			if release.Tag != "" {
-				downloadFiles(release.Tag, release.Assets)
+				downloadFiles(release.Tag, release.Assets, updateType)
 			}
 		}},
 		{"Skip Update", func() { os.WriteFile(filepath.Join(cacheDir, "version"), []byte(release.Tag+"i"), 0644); launchTagIt() }},
@@ -217,14 +339,17 @@ func main() {
 
 		// draw buttons
 		for i, btn := range buttons {
-			if isFirstLaunch && i > 0 && i < len(buttons)-1 { // Allow only Install and Exit buttons on first launch
+			if isFirstLaunch && i > 0 && i < len(buttons)-1 {
+				// disable all buttons except the first and last (install and exit) on first launch
 				rg.Disable()
 			}
+
 			if rg.Button(rl.NewRectangle(float32(windowWidth)/2-float32(buttonWidth)/2,
 				headerHeight+btnSpacing*(float32(i)+1)+float32(buttonHeight*i),
 				float32(buttonWidth), float32(buttonHeight)), btn.text) && downloadTotal.Load() == 0 {
 				btn.fn()
 			}
+
 			if isFirstLaunch && i > 0 && i < len(buttons)-1 {
 				rg.Enable()
 			}
