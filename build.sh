@@ -4,6 +4,8 @@ set -e
 
 mkdir -p build
 
+~/go/bin/go-winres simply
+
 GOOS="linux" \
     GOARCH="amd64" \
     CC="zig cc -target x86_64-linux-gnu \

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -18,8 +17,11 @@ import (
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
 
-//go:embed embed/fonts/hyperlegible.subset.otf
+//go:embed fonts/hyperlegible.subset.otf
 var fontData []byte
+
+//go:embed winres/icon.png
+var iconData []byte
 
 // ui constants
 const (
@@ -119,18 +121,6 @@ var (
 	downloadCurrent atomic.Int64
 	cacheDir        = filepath.Join(func() string { dir, _ := os.UserCacheDir(); return dir }(), "tagit")
 )
-
-func launchTagIt() {
-	execName := "tagit." + runtime.GOOS + ".x86_64"
-	if runtime.GOOS == "windows" {
-		execName += ".exe"
-	}
-	execPath := filepath.Join(cacheDir, execName)
-	if _, err := os.Stat(execPath); err == nil {
-		exec.Command(execPath).Start()
-		os.Exit(0)
-	}
-}
 
 // downloads the application assets for the current platform, downloads are performed concurrently and progress is tracked atomically
 func downloadFiles(tag string, assets []Asset, updateType int) {
@@ -274,6 +264,11 @@ func main() {
 	rl.SetTextureFilter(font.Texture, rl.FilterBilinear)
 	rg.SetFont(font)
 	rg.SetStyle(rg.DEFAULT, rg.TEXT_SIZE, 16)
+
+	// set window icon
+	icon := rl.LoadImageFromMemory(".png", iconData, int32(len(iconData)))
+	defer rl.UnloadImage(icon)
+	rl.SetWindowIcon(*icon)
 
 	// get ui colors from the current theme
 	textColor := rl.GetColor(uint(rg.GetStyle(rg.DEFAULT, rg.TEXT_COLOR_NORMAL)))
