@@ -23,6 +23,9 @@ var fontData []byte
 //go:embed winres/icon.png
 var iconData []byte
 
+//go:embed styles/dark.rgs
+var darkStyleData []byte
+
 // ui constants
 const (
 	windowWidth  = 600
@@ -257,6 +260,9 @@ func main() {
 	rl.InitWindow(windowWidth, windowHeight, "TagIt Launcher")
 	defer rl.CloseWindow()
 	rl.SetTargetFPS(60)
+
+	// load and apply dark theme
+	rg.LoadStyleFromMemory(darkStyleData)
 
 	// set up custom font and ui styling
 	font := rl.LoadFontFromMemory(".otf", fontData, int32(titleSize), nil)
