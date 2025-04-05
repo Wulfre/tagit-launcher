@@ -3,8 +3,8 @@ module wulf.re/tagit-launcher
 go 1.24.0
 
 require (
-	github.com/gen2brain/raylib-go/raygui v0.0.0-20250215042252-db8e47f0e5c5
-	github.com/gen2brain/raylib-go/raylib v0.0.0-20250215042252-db8e47f0e5c5
+	github.com/gen2brain/raylib-go/raygui v0.0.0-20250327103758-b542022337b8
+	github.com/gen2brain/raylib-go/raylib v0.0.0-20250327103758-b542022337b8
 )
 
 require (
